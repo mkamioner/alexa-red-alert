@@ -1,0 +1,10 @@
+/.venv
+/.mypy_cache
+/.pytest_cache
+/test-reports
+/.coverage
+/.vscode
+/.dist
+/.template.cf.yaml
+*.pyc
+__pycache__

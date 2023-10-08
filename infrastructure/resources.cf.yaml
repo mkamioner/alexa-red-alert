@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Alexa Red Alert Resources
+
+Resources:
+  DataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: alexa-red-alert-data-table
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at_s
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: pk1
+          AttributeType: S
+        - AttributeName: sk1
+          AttributeType: S
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      GlobalSecondaryIndexes:
+        - IndexName: pk1-sk1
+          KeySchema:
+            - AttributeName: pk1
+              KeyType: HASH
+            - AttributeName: sk1
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ScannerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: alexa-red-alert-scanner
+      Architectures:
+        - arm64
+      Timeout: 10
+      MemorySize: 128
+      Runtime: python3.11
+      Handler: alexa_red_alert.scanner.lambda_handler
+      CodeUri: ../.dist
+      Environment:
+        Variables:
+          DATA_TABLE_NAME: !Ref DataTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DataTable
+
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: alexa-red-alert-notifier
+      Architectures:
+        - arm64
+      Timeout: 10
+      MemorySize: 128
+      Runtime: python3.11
+      Handler: alexa_red_alert.notifier.lambda_handler
+      CodeUri: ../.dist
+      Environment:
+        Variables:
+          RED_ALERT_TOPIC_ARN: !Ref RedAlertTopic
+      Events:
+        DataTable:
+          Type: DynamoDB
+          Properties:
+            BatchSize: 1
+            StartingPosition: LATEST
+            Stream: !GetAtt DataTable.StreamArn
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt RedAlertTopic.TopicName
+        - Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:DescribeStream
+                - dynamodb:GetRecords
+                - dynamodb:GetShardIterator
+              Resource: !GetAtt DataTable.StreamArn
+            - Effect: Allow
+              Action: dynamodb:ListStreams
+              Resource: !Sub
+                - ${DataTableArn}/stream/*
+                - DataTableArn: !GetAtt DataTable.Arn
+
+  ScanRepeaterStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/stepfunctions/alexa-red-alert-scan-repeater
+      RetentionInDays: 14
+
+  ScanRepeaterStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: alexa-red-alert-scan-repeater
+      DefinitionUri: ../step_functions/scan_repeater.asl.yaml
+      DefinitionSubstitutions:
+        scannerFunctionArn: !Sub ${ScannerFunction.Arn}:$LATEST
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ScanRepeaterStateMachineLogGroup.Arn
+      Type: STANDARD
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutLogEvents
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+            - Effect: Allow
+              Action: lambda:InvokeFunction
+              Resource: !Sub ${ScannerFunction.Arn}:$LATEST
+
+  ScanRepeaterSchedulerEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: ScanRepeaterScheduler
+      ScheduleExpression: "rate(5 minutes)"
+      State: ENABLED
+      Targets:
+        - Id: StepFunctionTarget
+          Arn: !GetAtt ScanRepeaterStateMachine.Arn
+          RoleArn: !GetAtt ScanRepeaterSchedulerEventRole.Arn
+          Input: '{"stepCount": 250}'
+
+  ScanRepeaterSchedulerEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub alexa-red-alert-scan-repeater-${AWS::Region}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub alexa-red-alert-scan-repeater-policy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Ref ScanRepeaterStateMachine
+
+  GetStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: alexa-red-alert-get-status
+      Architectures:
+        - arm64
+      Timeout: 5
+      MemorySize: 128
+      Runtime: python3.11
+      Handler: alexa_red_alert.get_status_api.lambda_handler
+      CodeUri: ../.dist
+      Environment:
+        Variables:
+          DATA_TABLE_NAME: !Ref DataTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DataTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Method: GET
+            Path: /status
+            RestApiId: !Ref RestApi
+
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: alexa-red-alert-api
+      StageName: prod
+      Cors: "'*'"
+
+  RedAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: alexa-red-alert-topic
+
+Outputs:
+  ApiURL:
+    Description: URL to API
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/Stage

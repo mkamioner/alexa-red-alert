@@ -1,0 +1,13 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Alexa Red Alert Infrastructure
+
+Resources:
+  LambdaAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub alexa-red-alert-lambda-assets-${AWS::AccountId}-${AWS::Region}
+
+Outputs:
+  LambdaAssetsBucketName:
+    Description: Name of the S3 bucket to upload lambda assets too
+    Value: !Ref LambdaAssetsBucket

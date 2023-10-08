@@ -1,0 +1,12 @@
+-r requirements.txt
+
+black==23.9.1
+boto3==1.27.1  # This is the version in lambda Python 3.11 https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html
+freezegun==1.2.2
+isort==5.12.0
+mypy==1.5.1
+pylint==3.0.1
+pytest==7.4.2
+pytest-cov==4.1.0
+pytest-sugar==0.9.7
+
